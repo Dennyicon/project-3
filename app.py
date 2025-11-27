@@ -1,68 +1,105 @@
 from flask import Flask, request, jsonify
 import mysql.connector
 import os
-from google.cloud import storage
 from dotenv import load_dotenv
 
+# Load environment variables from .env (local development)
 load_dotenv()
 
 app = Flask(__name__)
 
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "yourpassword")
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_NAME = os.getenv("DB_NAME", "file_db")
-GCS_BUCKET = os.getenv("GCS_BUCKET", "your-gcs-bucket-name")
-
+# ---------------------------
+# Database configuration with fallback
+# ---------------------------
 db_config = {
-    'user': DB_USER,
-    'password': DB_PASSWORD,
-    'host': DB_HOST,
-    'database': DB_NAME
+    'user': os.getenv("DB_USER") or '443133',
+    'password': os.getenv("DB_PASSWORD") or 'dennyicon',
+    'host': os.getenv("DB_HOST") or 'mysql-denniskingori.alwaysdata.net',
+    'database': os.getenv("DB_NAME") or 'denniskingori_denny',
+    'port': int(os.getenv("DB_PORT", 3306))
 }
 
+# ---------------------------
+# Helper function to connect to MySQL
+# ---------------------------
 def get_db_connection():
     return mysql.connector.connect(**db_config)
 
-storage_client = storage.Client()  # uses application default credentials
+# ---------------------------
+# Route: Test database connection
+# ---------------------------
+@app.route("/testdb", methods=['GET'])
+def test_db():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT DATABASE();")
+        db_name = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return jsonify({"message": f"Connected to database: {db_name[0]}"}), 200
+    except Exception as e:
+        return jsonify({"message": f"Database connection error: {str(e)}"}), 500
 
-@app.route("/upload", methods=["POST"])
+# ---------------------------
+# Route: Upload file
+# ---------------------------
+@app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({"message":"No file part"}), 400
-    f = request.files['file']
-    if f.filename == '':
-        return jsonify({"message":"No selected file"}), 400
+        return jsonify({"message": "No file part in the request"}), 400
 
-    os.makedirs("uploads", exist_ok=True)
-    local_path = os.path.join("uploads", f.filename)
-    f.save(local_path)
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"message": "No file selected"}), 400
 
-    # upload to GCS
-    bucket = storage_client.bucket(GCS_BUCKET)
-    blob = bucket.blob(f.filename)
-    blob.upload_from_filename(local_path)
+    filename = file.filename
 
-    # save metadata in MySQL
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO files (filename, gcs_path) VALUES (%s, %s)",
-                (f.filename, f"gs://{GCS_BUCKET}/{f.filename}"))
-    conn.commit()
-    cur.close()
-    conn.close()
+    # Create uploads folder if it doesn't exist
+    if not os.path.exists('uploads'):
+        os.makedirs('uploads')
 
-    return jsonify({"message":"uploaded", "gcs": f"gs://{GCS_BUCKET}/{f.filename}"}), 201
+    file_path = os.path.join('uploads', filename)
+    file.save(file_path)
 
-@app.route("/files", methods=["GET"])
+    # Save file info in MySQL
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO files (filename, file_path) VALUES (%s, %s)",
+            (filename, file_path)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"message": f"File '{filename}' uploaded successfully!"}), 201
+    except Exception as e:
+        return jsonify({"message": f"MySQL error: {str(e)}"}), 500
+
+# ---------------------------
+# Route: List all uploaded files
+# ---------------------------
+@app.route('/files', methods=['GET'])
 def list_files():
-    conn = get_db_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT * FROM files ORDER BY uploaded_at DESC")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return jsonify(rows)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM files ORDER BY uploaded_at DESC")
+        files = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return jsonify(files), 200
+    except Exception as e:
+        return jsonify({"message": f"MySQL error: {str(e)}"}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+# ---------------------------
+# Main entry point
+# ---------------------------
+if __name__ == '__main__':
+    # Ensure uploads folder exists
+    if not os.path.exists('uploads'):
+        os.makedirs('uploads')
+    # Run Flask app
+    app.run(debug=True, host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
